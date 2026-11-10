@@ -3,9 +3,10 @@ import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { Chess, type Color, type PieceSymbol, type Square } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
-import { ArrowDownToLine, BookOpen, Check, ChevronLeft, ChevronRight, Lightbulb, RotateCcw, Sparkles, Swords } from 'lucide-react';
+import { ArrowDownToLine, BookOpen, Check, ChevronLeft, ChevronRight, History, Lightbulb, RotateCcw, Sparkles, Swords } from 'lucide-react';
 import TutorLesson, { type Variation } from './tutor-lesson';
 import { buildLesson, evidenceFromPosition, lessonMarkdown } from '../../lib/teaching';
+import { analysisKey, loadLibrary, recordPractice, saveAnalysis, type Practice } from '../../lib/library';
 import { AnalysisEngine } from '../../lib/analysis-engine';
 import { acceptable, analyzeGame, chartValue, cpLoss, keyMoments, legalLine, parseGame, REVIEW_NODES, scoreLabel, type Position, type Report, type Score } from '../../lib/analysis';
 
@@ -46,15 +47,38 @@ export default function Review() {
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
   const [feedback, setFeedback] = useState('');
   const [grading, setGrading] = useState(false);
+  const [reportId, setReportId] = useState<string | null>(null);
+  const [practice, setPractice] = useState<Record<string, Practice>>({});
+  const [storageNotice, setStorageNotice] = useState('');
+  const assisted = useRef(new Set<string>());
   const boardSection = useRef<HTMLElement>(null);
   const engine = useRef<AnalysisEngine | null>(null);
   const run = useRef(0);
   useEffect(() => {
+    let currentPgn = ''; let currentPlayer: Color = 'w';
     try {
       const stored = JSON.parse(localStorage.getItem('chessmate.game.v1') ?? 'null');
-      if (typeof stored?.pgn === 'string') setPgn(stored.pgn);
-      if (stored?.player === 'b') setPlayer('b');
+      if (typeof stored?.pgn === 'string') { currentPgn = stored.pgn; setPgn(stored.pgn); }
+      if (stored?.player === 'b') { currentPlayer = 'b'; setPlayer('b'); }
     } catch { /* PGN can still be pasted when local storage is unavailable. */ }
+    try {
+      const library = loadLibrary(); const query = new URLSearchParams(window.location.search);
+      let entry = library.entries.find(e => e.id === (query.get('saved') ?? library.activeId));
+      if (!query.has('saved') && query.get('current') === '1') {
+        entry = undefined;
+        try {
+          const current = parseGame(currentPgn);
+          const key = JSON.stringify([current.initialFen, currentPlayer, current.moves.map(m => m.from + m.to + (m.promotion ?? ''))]);
+          entry = library.entries.find(e => analysisKey(e.report) === key);
+        } catch { /* A fresh or empty game has no report yet. */ }
+      }
+      if (query.has('saved') && !entry) setStorageNotice('找不到這份報告，可能已被刪除。請到「我的複習」查看其他紀錄。');
+      if (entry) {
+        setPgn(entry.pgn); setPlayer(entry.report.player); setReport(entry.report); setReportId(entry.id); setPractice(entry.practice); setCursor(entry.report.positions.length);
+        const chosen = keyMoments(entry.report).find(p => p.ply === Number(query.get('ply')));
+        if (chosen) openMoment(chosen);
+      }
+    } catch (e) { setStorageNotice((e as Error).message); }
     return () => { run.current++; engine.current?.close(); };
   }, []);
   function clearTrial() { setHint(false); setVariation(null); setTrial(null); setSelected(null); setPendingPromotion(null); setFeedback(''); setRevealed(false); }
@@ -62,13 +86,13 @@ export default function Review() {
   async function start() {
     try { parseGame(pgn); } catch (e) { setError((e as Error).message); return; }
     cancel(); const token = ++run.current;
-    setError(''); setReport(null); clearTrial(); setMoment(null); setBusy(true); setProgress({ percent: 0, text: '正在載入分析引擎…' });
+    setError(''); setReport(null); setReportId(null); setPractice({}); setStorageNotice(''); clearTrial(); setMoment(null); setBusy(true); setProgress({ percent: 0, text: '正在載入分析引擎…' });
     let worker: AnalysisEngine | null = null;
     try {
       worker = new AnalysisEngine(); engine.current = worker;
       await worker.init();
       const result = await analyzeGame(pgn, player, worker.search, (percent, text) => { if (token === run.current) setProgress({ percent, text }); });
-      if (token === run.current) { setReport(result); setCursor(result.positions.length); }
+      if (token === run.current) { setReport(result); setCursor(result.positions.length); preserve(result, pgn); }
     } catch (e) { if (token === run.current) setError(e instanceof Error ? e.message : '分析失敗，請重新嘗試。'); }
     finally { worker?.close(); if (token === run.current) { engine.current = null; setBusy(false); } }
   }
@@ -77,8 +101,14 @@ export default function Review() {
     clearTrial(); setMoment(null); setCursor(ply);
   }
   function editPgn(value: string) {
-    inspect(0); setPgn(value); setReport(null); setError(''); setProgress({ percent: 0, text: '' });
+    inspect(0); setPgn(value); setReport(null); setReportId(null); setPractice({}); setStorageNotice(''); setError(''); setProgress({ percent: 0, text: '' });
   }
+  function preserve(result: Report, source: string) {
+    try { const saved = saveAnalysis(source, result); setReportId(saved.id); setPractice(saved.practice); setStorageNotice(''); }
+    catch (e) { setStorageNotice(`這份報告尚未保存：${(e as Error).message}`); }
+  }
+  function showHint() { if (active) assisted.current.add(`${active.fen}|${active.uci}`); setHint(true); }
+  function showAnswer() { if (active) assisted.current.add(`${active.fen}|${active.uci}`); setRevealed(true); }
   function openMoment(p: Position) {
     inspect(p.ply - 1); setMoment(p.ply); setTrial(new Chess(p.fen));
     setFeedback('先不看答案，試著找出更好的走法。');
@@ -104,6 +134,12 @@ export default function Review() {
       if (token === run.current) {
         const good = acceptable(best.score, tested.score, active.mover);
         setFeedback(good ? '做得好！這步接近引擎建議，或保留了相同的將殺結果。' : `還有改進空間。${line.length > 1 ? `對手可以回應 ${line[1]}。` : ''}你可以重試，或查看參考答案。`);
+        if (reportId) {
+          try {
+            const updated = recordPractice(reportId, active.ply, good, !assisted.current.has(`${active.fen}|${active.uci}`));
+            setPractice(old => ({ ...old, [active.ply]: updated }));
+          } catch (e) { setStorageNotice(`走法已評估，但進度尚未保存：${(e as Error).message}`); }
+        }
       }
     } catch (e) { if (token === run.current) { setFeedback('暫時無法評估這一步，請重試。'); setError(e instanceof Error ? e.message : '評估失敗。'); } }
     finally { worker?.close(); if (token === run.current) { engine.current = null; setGrading(false); } }
@@ -135,21 +171,23 @@ export default function Review() {
   const moments = report ? keyMoments(report) : [];
   const atScore: Score | null = report ? cursor === 0 ? report.initialScore : report.positions[cursor - 1].played.score : null;
   return <div className="app-shell">
-    <header className="topbar"><Link className="brand" href="/"><span className="brand-icon">♞</span><strong>棋伴<span>Chessmate</span></strong></Link><nav><Link href="/" className="review-nav-link"><Swords size={16}/> 對弈練習</Link><Link href="/review" className="nav-active"><BookOpen size={16}/> 復盤教室</Link></nav></header>
+    <header className="topbar"><Link className="brand" href="/"><span className="brand-icon">♞</span><strong>棋伴<span>Chessmate</span></strong></Link><nav><Link href="/" className="review-nav-link"><Swords size={16}/> 對弈練習</Link><Link href="/review" className="nav-active"><BookOpen size={16}/> 復盤教室</Link><Link href="/library" className="review-nav-link"><History size={16}/>我的複習</Link></nav></header>
     <main><div className="page-heading"><div><div className="eyebrow"><span/> LEARN FROM YOUR MOVES</div><h1>回頭看，走得更好<span>。</span></h1><p>找出關鍵時刻，先試著重走，再看引擎的建議。</p></div><Link href="/" className="review-back">← 回到對局</Link></div>
+      {storageNotice && <div className="storage-notice storage-warning" role="status"><span>{storageNotice}</span>{report && !busy && !grading && <button onClick={() => preserve(report, pgn)}>重新保存報告</button>}<Link href="/library">管理複習紀錄 →</Link></div>}
+      {reportId && !storageNotice && <div className="saved-indicator"><Check size={14}/><span>報告已保存在此瀏覽器</span><Link href="/library">查看我的複習 →</Link></div>}
       <div className="workspace review-workspace"><section className="board-section" ref={boardSection} tabIndex={-1} aria-label="復盤棋盤">
         <div className="review-board-heading"><strong>{variation ? `${variation.kind === 'best' ? '建議變化' : '原走法變化'} · 第 ${variation.step} 手` : active ? trial?.history().length ? `你的重走：${trial.history()[0]}` : `${moveLabel(active)} 之前 · 輪到${active.mover === 'w' ? '白' : '黑'}方` : report ? cursor === 0 ? '開局局面' : `第 ${cursor} 手之後` : '等待匯入棋局'}</strong><span>{trial ? '重走練習' : atScore ? `白方視角 ${scoreLabel(atScore)}` : 'PGN 棋譜分析'}</span></div>
         <div className="board-frame"><Chessboard options={{ id: 'review-board', position: fen, boardOrientation: player === 'w' ? 'white' : 'black', allowDragging: !!trial && !trial.history().length && !grading && !variation, onSquareClick: ({ square }) => onSquare(square), onPieceDrop: ({ sourceSquare, targetSquare }) => { if (targetSquare) void attempt(sourceSquare, targetSquare); return false; }, squareStyles, darkSquareStyle: { backgroundColor: '#79958b' }, lightSquareStyle: { backgroundColor: '#f0eee5' } }}/></div>
         {pendingPromotion && <div className="review-promotion" role="group" aria-label="重試升變選擇"><span>選擇升變：</span>{(['q', 'r', 'b', 'n'] as const).map((p, i) => <button key={p} onClick={() => void attempt(pendingPromotion.from, pendingPromotion.to, p)}>{['后', '車', '象', '馬'][i]}</button>)}<button onClick={() => setPendingPromotion(null)}>取消</button></div>}
-        {active && <div className="retry-panel"><p role="status" aria-live="polite">{feedback}</p><div className="retry-actions"><button disabled={grading} onClick={() => openMoment(active)}><RotateCcw size={15}/> 再試一次</button><button disabled={grading} onClick={() => setHint(true)}><Lightbulb size={15}/> 給我提示</button><button disabled={grading} onClick={() => setRevealed(true)}><Lightbulb size={15}/> 查看參考答案</button></div>{hint && !revealed && <p className="lesson-hint" role="status">{buildLesson(evidenceFromPosition(active)).hint}</p>}{revealed && <div className="answer"><strong>引擎建議：{legalLine(active.fen, active.best.pv)[0]}</strong><TutorLesson key={active.ply} position={active} variation={variation} onVariation={value => { setVariation(value); setSelected(null); setPendingPromotion(null); }}/></div>}</div>}
+        {active && <div className="retry-panel"><p role="status" aria-live="polite">{feedback}</p><div className="retry-actions"><button disabled={grading} onClick={() => openMoment(active)}><RotateCcw size={15}/> 再試一次</button><button disabled={grading} onClick={showHint}><Lightbulb size={15}/> 給我提示</button><button disabled={grading} onClick={showAnswer}><Lightbulb size={15}/> 查看參考答案</button></div>{practice[active.ply] && <p className="practice-summary">練習 {practice[active.ply].attempts} 次 · 答對 {practice[active.ply].successes} 次 · 獨立答對 {practice[active.ply].independentSuccesses} 次</p>}{hint && !revealed && <p className="lesson-hint" role="status">{buildLesson(evidenceFromPosition(active)).hint}</p>}{revealed && <div className="answer"><strong>引擎建議：{legalLine(active.fen, active.best.pv)[0]}</strong><TutorLesson key={active.ply} position={active} variation={variation} onVariation={value => { setVariation(value); setSelected(null); setPendingPromotion(null); }}/></div>}</div>}
         {report && <Curve report={report} cursor={cursor} onSelect={inspect}/>}
       </section><aside className="side-panel">
-        <section className="session-card analysis-input"><div className="section-label">GAME REVIEW <Sparkles size={16}/></div><h2>分析你的棋局</h2><p>已帶入此裝置的對局，也可以貼上其他 PGN。分析不會改動原本的棋局。</p><label htmlFor="pgn-input">PGN 棋譜</label><textarea id="pgn-input" value={pgn} maxLength={32000} disabled={busy || grading} onChange={e => editPgn(e.target.value)} placeholder="例如：1. e4 e5 2. Nf3 Nc6" rows={5}/><div className="input-options"><button className="text-button" disabled={busy || grading} onClick={() => { editPgn(example); setPlayer('w'); }}>使用教學範例</button><span>最多 120 回合</span></div><label>分析哪一方的失誤？</label><div className="choice-row" role="group" aria-label="分析棋色">{(['w', 'b'] as const).map(c => <button key={c} aria-pressed={player === c} disabled={busy || grading} className={player === c ? 'chosen' : ''} onClick={() => { setPlayer(c); setReport(null); clearTrial(); setMoment(null); }}>{c === 'w' ? '白方' : '黑方'}{player === c && <Check size={14}/>}</button>)}</div>
+        <section className="session-card analysis-input"><div className="section-label">GAME REVIEW <Sparkles size={16}/></div><h2>分析你的棋局</h2><p>已帶入此裝置的對局，也可以貼上其他 PGN。分析不會改動原本的棋局。</p><label htmlFor="pgn-input">PGN 棋譜</label><textarea id="pgn-input" value={pgn} maxLength={32000} disabled={busy || grading} onChange={e => editPgn(e.target.value)} placeholder="例如：1. e4 e5 2. Nf3 Nc6" rows={5}/><div className="input-options"><button className="text-button" disabled={busy || grading} onClick={() => { editPgn(example); setPlayer('w'); }}>使用教學範例</button><span>最多 120 回合</span></div><label>分析哪一方的失誤？</label><div className="choice-row" role="group" aria-label="分析棋色">{(['w', 'b'] as const).map(c => <button key={c} aria-pressed={player === c} disabled={busy || grading} className={player === c ? 'chosen' : ''} onClick={() => { setPlayer(c); setReport(null); setReportId(null); setPractice({}); setStorageNotice(''); clearTrial(); setMoment(null); }}>{c === 'w' ? '白方' : '黑方'}{player === c && <Check size={14}/>}</button>)}</div>
           <button className="primary-button analyze-button" onClick={() => void start()} disabled={busy || grading || !pgn.trim()}><Sparkles size={17}/>{report ? '重新分析棋局' : '開始分析棋局'}</button>
           {busy && <div className="analysis-progress" role="status"><progress value={progress.percent} max={100} aria-label="棋局分析進度"/><p>{progress.text} · {progress.percent}%</p><button onClick={cancel}>取消分析</button></div>}
           {!busy && progress.text === '分析已取消，可重新開始。' && <p role="status">{progress.text}</p>}
           {error && <div className="error" role="alert">{error}</div>}
-          <p className="analysis-note">在此裝置背景分析；長棋局需要較久。請保持此頁開啟，重整後需重新分析。</p>
+          <p className="analysis-note">在此裝置背景分析；長棋局需要較久，請保持此頁開啟。完成後會自動保存報告，最多 20 份。</p>
         </section>
         <section className="session-card moments-card"><div className="section-label">KEY MOMENTS <BookOpen size={16}/></div><h2>{report ? `${report.player === 'w' ? '白' : '黑'}方的關鍵時刻` : '從失誤中練習'}</h2>{!report ? <p>完成分析後，這裡會挑出最多三個值得重走的局面。</p> : !moments.length ? <div className="no-moments"><Check size={22}/><p>這次搜尋沒有找到達到標記門檻的關鍵失誤。這不代表每一步都是最佳走法。</p></div> : moments.map((p, i) => <button className={'moment-card ' + (moment === p.ply ? 'selected-moment' : '')} key={p.ply} onClick={() => openMoment(p)}><span className="moment-number">0{i + 1}</span><span><strong>{moveLabel(p)}</strong><span>{p.finding ? names[p.finding] : ''}{cpLoss(p.best.score, p.played.score, p.mover) !== null ? ` · 評分損失 ${((cpLoss(p.best.score, p.played.score, p.mover) ?? 0) / 100).toFixed(2)}` : ''}</span></span><span>重走 →</span></button>)}
         {report && <button className="download-lesson" onClick={downloadLesson}><ArrowDownToLine size={16}/>下載復盤講義</button>}{report && <p className="analysis-note">初步掃描後，加強搜尋最多六個候選失誤。一般失誤門檻約 1 分、重大失誤約 2 分；結果會隨搜尋預算改變。</p>}</section>
