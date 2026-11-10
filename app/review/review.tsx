@@ -171,7 +171,7 @@ export default function Review() {
   const moments = report ? keyMoments(report) : [];
   const atScore: Score | null = report ? cursor === 0 ? report.initialScore : report.positions[cursor - 1].played.score : null;
   return <div className="app-shell">
-    <header className="topbar"><Link className="brand" href="/"><span className="brand-icon">♞</span><strong>棋伴<span>Chessmate</span></strong></Link><nav><Link href="/" className="review-nav-link"><Swords size={16}/> 對弈練習</Link><Link href="/review" className="nav-active"><BookOpen size={16}/> 復盤教室</Link><Link href="/library" className="review-nav-link"><History size={16}/>我的複習</Link></nav></header>
+    <header className="topbar"><Link className="brand" href="/"><span className="brand-icon">♞</span><strong>棋伴<span>Chessmate</span></strong></Link><nav><Link href="/" className="review-nav-link"><Swords size={16}/> 對弈練習</Link><Link href="/review" className="nav-active"><BookOpen size={16}/> 復盤教室</Link><Link href="/library" className="review-nav-link"><History size={16}/>我的複習</Link><Link href="/settings" className="review-nav-link">AI 設定</Link></nav></header>
     <main><div className="page-heading"><div><div className="eyebrow"><span/> LEARN FROM YOUR MOVES</div><h1>回頭看，走得更好<span>。</span></h1><p>找出關鍵時刻，先試著重走，再看引擎的建議。</p></div><Link href="/" className="review-back">← 回到對局</Link></div>
       {storageNotice && <div className="storage-notice storage-warning" role="status"><span>{storageNotice}</span>{report && !busy && !grading && <button onClick={() => preserve(report, pgn)}>重新保存報告</button>}<Link href="/library">管理複習紀錄 →</Link></div>}
       {reportId && !storageNotice && <div className="saved-indicator"><Check size={14}/><span>報告已保存在此瀏覽器</span><Link href="/library">查看我的複習 →</Link></div>}
@@ -192,7 +192,7 @@ export default function Review() {
         <section className="session-card moments-card"><div className="section-label">KEY MOMENTS <BookOpen size={16}/></div><h2>{report ? `${report.player === 'w' ? '白' : '黑'}方的關鍵時刻` : '從失誤中練習'}</h2>{!report ? <p>完成分析後，這裡會挑出最多三個值得重走的局面。</p> : !moments.length ? <div className="no-moments"><Check size={22}/><p>這次搜尋沒有找到達到標記門檻的關鍵失誤。這不代表每一步都是最佳走法。</p></div> : moments.map((p, i) => <button className={'moment-card ' + (moment === p.ply ? 'selected-moment' : '')} key={p.ply} onClick={() => openMoment(p)}><span className="moment-number">0{i + 1}</span><span><strong>{moveLabel(p)}</strong><span>{p.finding ? names[p.finding] : ''}{cpLoss(p.best.score, p.played.score, p.mover) !== null ? ` · 評分損失 ${((cpLoss(p.best.score, p.played.score, p.mover) ?? 0) / 100).toFixed(2)}` : ''}</span></span><span>重走 →</span></button>)}
         {report && <button className="download-lesson" onClick={downloadLesson}><ArrowDownToLine size={16}/>下載復盤講義</button>}{report && <p className="analysis-note">初步掃描後，加強搜尋最多六個候選失誤。一般失誤門檻約 1 分、重大失誤約 2 分；結果會隨搜尋預算改變。</p>}</section>
         <section className="coach-card"><div className="coach-icon"><Lightbulb size={21}/></div><div><div className="coach-heading">先思考，再看答案</div><p>點選關鍵時刻，在棋盤走出你的選擇。接近引擎建議的替代走法也能被接受。</p></div></section>
-        <p className="analysis-note review-disclaimer">引擎教學可直接使用；AI 教練由站方選擇啟用。</p>
+        <p className="analysis-note review-disclaimer">引擎教學可直接使用；可在「AI 設定」連接自己的 OpenAI 或 Gemini 金鑰。</p>
       </aside></div>
       <footer><span>棋伴 CHESSMATE</span><p>每一個失誤，都是下一次進步的起點。</p></footer>
     </main>
