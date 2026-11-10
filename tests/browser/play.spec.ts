@@ -1,0 +1,30 @@
+import { test, expect } from '@playwright/test';
+test('play with real Stockfish, replay, restore, undo and export', async ({ page }) => {
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: '每一步，都是進步。' })).toBeVisible();
+  await page.locator('[data-square="e2"]').click(); await page.locator('[data-square="e4"]').click();
+  await expect(page.locator('.move-row button').first()).toHaveText('e4');
+  await expect(page.locator('.move-row button').nth(1)).not.toHaveText('—', { timeout: 30000 });
+  await expect(page.locator('.turn-indicator')).toHaveText('輪到你了');
+  await page.reload(); await expect(page.locator('.move-row button').first()).toHaveText('e4');
+  await page.getByRole('button', { name: '回到開局', exact: true }).click();
+  await expect(page.locator('.turn-indicator')).toHaveText('回放中');
+  await page.getByRole('button', {name: '回到對局', exact: true}).click();
+  const download = page.waitForEvent('download'); await page.getByRole('button', {name: '匯出 PGN', exact:true}).click();
+  expect((await download).suggestedFilename()).toBe('chessmate.pgn');
+  await page.getByRole('button', {name:'悔棋',exact:true}).click();
+  await expect(page.getByText('故事，從第一步開始')).toBeVisible();
+  expect(errors).toEqual([]);
+});
+test('mobile layout and black-side new game', async ({ page }) => {
+  await page.setViewportSize({width:390,height:844}); await page.goto('/');
+  await expect(page.getByRole('heading', {name: '每一步，都是進步。'})).toBeVisible();
+  await page.screenshot({path:'/tmp/chessmate-mobile.png',fullPage:true});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button',{name:'開始新對局'}).click();
+  await page.getByRole('button',{name:'執黑後行'}).click();
+  await page.getByRole('button',{name:'開始對弈',exact:true}).click();
+  await expect(page.locator('.move-row button').first()).not.toHaveText('—',{timeout:30000});
+  await expect(page.locator('.turn-indicator')).toHaveText('輪到你了');
+});
