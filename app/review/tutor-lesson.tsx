@@ -27,7 +27,7 @@ export default function TutorLesson({ position, variation, onVariation }: { posi
     if (pending.current) return;
     const controller = new AbortController(); pending.current = controller; setWorking(true); setNotice('');
     try {
-      const response = await fetch('/api/tutor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(evidence), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]) });
+      const response = await fetch('/api/tutor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(evidence), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(55000)]) });
       if (!response.ok) throw new Error('Tutor unavailable');
       const data = await response.json();
       if (data.source !== 'engine' && data.source !== 'ai') throw new Error('Unexpected response');

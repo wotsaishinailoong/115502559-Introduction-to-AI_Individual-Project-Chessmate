@@ -3,9 +3,21 @@ import { HttpError } from './http-server.ts';
 import { providerFetch, type Fetcher } from './provider-http.ts';
 import { type Provider, providers, validModel } from './tutor-config.ts';
 import type { Credential } from './tutor-sessions.ts';
-import type { Lesson, TutorEvidence } from './teaching.ts';
+import { tutorCoordinates, type Lesson, type TutorEvidence } from './teaching.ts';
 
 const instructions = '你是繁體中文西洋棋初學者教練。只依據提供的引擎事實與合法變化線講解。不要自行計算走法、發明棋子位置、宣稱唯一解、把局勢分數當勝率，或假設對手必定依示範線走。以簡單、友善、具體的文字說明為什麼要改進、如何比較建議走法，以及下一局的一個檢查習慣。只引用提供的 factIds；沒有依據時承認無法判定戰術原因。';
+// Only fixed, actionable messages leave the server; provider bodies may contain secrets.
+export class TutorProviderError extends Error {
+  code: string;
+  constructor(code: string, message: string) { super(message); this.code = code; }
+}
+function providerFailure(status: number): TutorProviderError {
+  if (status === 401 || status === 403) return new TutorProviderError('access', 'AI 服務拒絕生成：請確認金鑰與模型的生成權限，再到 AI 設定重新連接。');
+  if (status === 429) return new TutorProviderError('quota', 'AI 服務的額度不足或請求過於頻繁：請檢查該服務的 API 額度與計費，稍後再試。');
+  if (status === 404) return new TutorProviderError('model', '找不到可生成解說的模型：請到 AI 設定確認模型 ID。');
+  if (status === 400 || status === 422) return new TutorProviderError('request', '模型不支援目前的結構化教學請求：請在 AI 設定改用預設文字模型。');
+  return new TutorProviderError('service', 'AI 服務暫時無法生成解說，請稍後再試。');
+}
 export async function verifyCredential(credential: Credential, fetcher?: Fetcher, signal?: AbortSignal) {
   const { key, provider, model } = credential;
   if (!validModel(model, provider)) throw new HttpError(400, '模型名稱不正確。');
@@ -32,28 +44,30 @@ export async function verifyCredential(credential: Credential, fetcher?: Fetcher
 
 export async function generateTutor(credential: Credential, evidence: TutorEvidence, lesson: Lesson, signal: AbortSignal, fetcher?: Fetcher): Promise<unknown> {
   const schema = { type: 'object', additionalProperties: false,
-    properties: { title: { type: 'string' }, why: { type: 'array', items: { type: 'string' } }, better: { type: 'string' }, takeaway: { type: 'string' }, factIds: { type: 'array', items: { type: 'string', enum: lesson.facts.map(f => f.id) } } },
+    properties: { title: { type: 'string', minLength: 1, maxLength: 60 }, why: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 240 } }, better: { type: 'string', minLength: 1, maxLength: 400 }, takeaway: { type: 'string', minLength: 1, maxLength: 160 }, factIds: { type: 'array', minItems: 1, maxItems: lesson.facts.length, items: { type: 'string', enum: lesson.facts.map(f => f.id) } } },
     required: ['title', 'why', 'better', 'takeaway', 'factIds'],
   };
-  const input = JSON.stringify({ facts: lesson.facts, theme: lesson.theme, bestLine: lesson.bestLine, playedLine: lesson.playedLine, scorePerspective: 'white', learner: new Chess(evidence.fen).turn() });
+  const input = JSON.stringify({ allowedSquares: tutorCoordinates(lesson, evidence), outputRules: '只可提及 allowedSquares 內的格子。title 最多60字；why 1至3項，每項最多240字；better 最多400字；takeaway 最多160字。不要用 Markdown 包住 JSON。', facts: lesson.facts, theme: lesson.theme, bestLine: lesson.bestLine, playedLine: lesson.playedLine, scorePerspective: 'white', learner: new Chess(evidence.fen).turn() });
   const { provider, key, model } = credential;
   const url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const headers: Record<string, string> = provider === 'openai' ? { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` } : { 'Content-Type': 'application/json', 'x-goog-api-key': key };
-  const body = provider === 'openai' ? { model, max_completion_tokens: 900, store: false,
+  const body = provider === 'openai' ? { model, max_completion_tokens: 4096, store: false,
     messages: [{ role: 'system', content: instructions }, { role: 'user', content: input }],
     response_format: { type: 'json_schema', json_schema: { name: 'chess_lesson', strict: true, schema } },
-  } : { systemInstruction: { parts: [{ text: instructions }] }, contents: [{ role: 'user', parts: [{ text: input }] }], generationConfig: { maxOutputTokens: 1500, responseMimeType: 'application/json', responseJsonSchema: schema } };
+  } : { systemInstruction: { parts: [{ text: instructions }] }, contents: [{ role: 'user', parts: [{ text: input }] }], generationConfig: { maxOutputTokens: 4096, ...(/^gemini-[3-9]/.test(model) ? { thinkingConfig: { thinkingLevel: 'LOW' } } : /^gemini-2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}), responseMimeType: 'application/json', responseJsonSchema: schema } };
   const response = await providerFetch(url, { method: 'POST', signal, headers, body: JSON.stringify(body) }, fetcher);
-  if (!response.ok) { await response.body?.cancel(); throw new Error('Provider unavailable'); }
+  if (!response.ok) { await response.body?.cancel(); throw providerFailure(response.status); }
   const raw = await response.text(); if (raw.length > 50000) throw new Error('Provider response too large');
   const data = JSON.parse(raw);
   let text: string;
   if (provider === 'openai') {
+    if (data?.choices?.[0]?.finish_reason === 'length') throw new TutorProviderError('output_limit', 'AI 回覆達到輸出上限，未完成解說；請改用預設文字模型後重試。');
     const message = data?.choices?.[0]?.message;
-    if (message?.refusal || typeof message?.content !== 'string') throw new Error('No usable text');
+    if (message?.refusal || typeof message?.content !== 'string') throw new TutorProviderError('blocked', 'AI 服務沒有提供可用文字，請稍後重試或更換文字模型。');
     text = message.content;
   } else {
     const candidate = data?.candidates?.[0];
+    if (candidate?.finishReason === 'MAX_TOKENS') throw new TutorProviderError('output_limit', 'AI 思考或文字達到輸出上限，未完成解說；請改用預設文字模型後重試。');
     if (!candidate || candidate.finishReason !== 'STOP' || !Array.isArray(candidate.content?.parts)) throw new Error('No completed text');
     text = candidate.content.parts.filter((p: { thought?: boolean; text?: string }) => !p.thought && typeof p.text === 'string').map((p: { text: string }) => p.text).join('');
   }

@@ -101,6 +101,13 @@ export function buildLesson(raw: TutorEvidence): Lesson {
   };
 }
 
+export function tutorCoordinates(lesson: Lesson, evidence: TutorEvidence): string[] {
+  const coordinates = new Set([evidence.uci, ...evidence.best.pv, ...evidence.played.pv].flatMap(m => [m.slice(0, 2), m.slice(2, 4)]));
+  // Rule-verified counterfactual replies may add a legal defence outside the engine PV.
+  for (const fact of lesson.facts) for (const square of fact.text.match(/[a-h][1-8]/g) ?? []) coordinates.add(square);
+  return [...coordinates];
+}
+
 export function validateTutorText(value: unknown, lesson: Lesson, evidence: TutorEvidence): TutorText {
   const data = object(value);
   const text = (value: unknown, max: number) => {
@@ -110,9 +117,7 @@ export function validateTutorText(value: unknown, lesson: Lesson, evidence: Tuto
   if (!Array.isArray(data.why) || !data.why.length || data.why.length > 3 || !Array.isArray(data.factIds) || data.factIds.length < 1 || data.factIds.length > lesson.facts.length || !data.factIds.every(id => typeof id === 'string' && lesson.facts.some(f => f.id === id))) throw new Error('AI 教學缺少可核對的依據。');
   const result: TutorText = { title: text(data.title, 60), why: data.why.map(v => text(v, 240)), better: text(data.better, 400), takeaway: text(data.takeaway, 160), factIds: [...new Set(data.factIds)] as string[] };
   // Reject invented board coordinates. This is a useful guard, not proof that prose is correct.
-  const coordinates = new Set([evidence.uci, ...evidence.best.pv, ...evidence.played.pv].flatMap(m => [m.slice(0, 2), m.slice(2, 4)]));
-  // Rule-verified counterfactual replies may add a legal defence outside the engine PV.
-  for (const fact of lesson.facts) for (const square of fact.text.match(/[a-h][1-8]/g) ?? []) coordinates.add(square);
+  const coordinates = new Set(tutorCoordinates(lesson, evidence));
   for (const square of JSON.stringify(result).match(/[a-h][1-8]/g) ?? []) if (!coordinates.has(square)) throw new Error('AI 教學包含沒有引擎依據的格子。');
   return result;
 }

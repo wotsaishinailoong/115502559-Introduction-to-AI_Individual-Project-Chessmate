@@ -86,3 +86,37 @@ test('provider and credential caches do not reuse another key or provider respon
  const gemini=await tutorReply(evidence,{key:'test-only-cache-key-a',provider:'gemini',model:'gemini-cache-test',fetcher:async()=>{calls++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(text)}]}}]});}});
  assert.equal(openai.source,'ai');assert.equal(differentKey.source,'ai');assert.equal(gemini.source,'ai');assert.equal(calls,3);
 });
+
+test('both providers receive enough output budget and the same validator constraints', async()=>{
+ const evidence=fixture(),lesson=buildLesson(evidence);
+ for(const provider of ['openai','gemini'] as const){
+  await generateTutor({key:dummy,provider,model:provider==='openai'?'gpt-4.1-mini':'gemini-3.8-flash'},evidence,lesson,AbortSignal.timeout(2000),async(_url,init)=>{
+   const body=JSON.parse(init!.body as string);
+   const schema=provider==='openai'?body.response_format.json_schema.schema:body.generationConfig.responseJsonSchema;
+   assert.equal(schema.properties.why.maxItems,3);assert.equal(schema.properties.better.maxLength,400);
+   const input=JSON.parse(provider==='openai'?body.messages[1].content:body.contents[0].parts[0].text);
+   assert.ok(input.allowedSquares.includes('h4'));assert.ok(!input.allowedSquares.includes('a7'));
+   if(provider==='openai'){assert.equal(body.max_completion_tokens,4096);return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(text)}}]});}
+   assert.equal(body.generationConfig.maxOutputTokens,4096);assert.equal(body.generationConfig.thinkingConfig.thinkingLevel,'LOW');
+   return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(text)}]}}]});
+  });
+ }
+});
+
+test('generation failures explain the next action without exposing provider bodies or keys',async()=>{
+ const cases:[number,string][]=[[401,'access'],[403,'access'],[429,'quota'],[404,'model'],[400,'request'],[503,'service']];
+ for(const provider of ['openai','gemini'] as const)for(const [status,code] of cases){
+  let calls=0;
+  const result=await tutorReply(fixture(),{key:`test-diagnostics-${provider}-${status}`,provider,fetcher:async()=>{calls++;return new Response(`private-body-${dummy}`,{status});}});
+  assert.equal(result.source,'engine');assert.ok(result.notice.includes(`[${code}]`));assert.ok(!JSON.stringify(result).includes(dummy));assert.equal(calls,1);
+ }
+});
+
+test('incomplete output and ungrounded content remain engine fallbacks with distinct diagnostics',async()=>{
+ for(const provider of ['openai','gemini'] as const){
+  const result=await tutorReply(fixture(),{key:`test-truncation-${provider}`,provider,fetcher:async()=>Response.json(provider==='openai'?{choices:[{finish_reason:'length',message:{content:'{"title":'}}]}:{candidates:[{finishReason:'MAX_TOKENS',content:{parts:[]}}]})});
+  assert.equal(result.source,'engine');assert.match(result.notice,/\[output_limit\]/);
+ }
+ const invalid=await tutorReply(fixture(),{key:'test-invalid-grounding',fetcher:async()=>Response.json({choices:[{message:{content:JSON.stringify({...text,better:'王走到 a7。'})}}]})});
+ assert.equal(invalid.source,'engine');assert.match(invalid.notice,/\[validation\]/);
+});
