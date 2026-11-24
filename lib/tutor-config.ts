@@ -1,4 +1,6 @@
 export type Provider = 'openai' | 'gemini';
+export const TUTOR_SERVER_TIMEOUT_MS = 90_000;
+export const TUTOR_CLIENT_TIMEOUT_MS = TUTOR_SERVER_TIMEOUT_MS + 10_000;
 export const providers = {
   openai: { name: 'OpenAI', model: 'gpt-4.1-mini', keyUrl: 'https://platform.openai.com/api-keys' },
   gemini: { name: 'Google Gemini', model: 'gemini-3.8-flash', keyUrl: 'https://aistudio.google.com/api-keys' },

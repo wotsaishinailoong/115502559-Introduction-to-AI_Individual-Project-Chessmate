@@ -51,10 +51,10 @@ export async function verifyCredential(credential: Credential, fetcher?: Fetcher
 
 export async function generateTutor(credential: Credential, evidence: TutorEvidence, lesson: Lesson, signal: AbortSignal, fetcher?: Fetcher): Promise<unknown> {
   const schema = { type: 'object', additionalProperties: false,
-    properties: { title: { type: 'string', minLength: 1, maxLength: 60 }, why: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 240 } }, better: { type: 'string', minLength: 1, maxLength: 400 }, takeaway: { type: 'string', minLength: 1, maxLength: 160 }, factIds: { type: 'array', minItems: 1, maxItems: lesson.facts.length, items: { type: 'string', enum: lesson.facts.map(f => f.id) } } },
+    properties: { title: { type: 'string', minLength: 1, maxLength: 40 }, why: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'string', minLength: 1, maxLength: 120 } }, better: { type: 'string', minLength: 1, maxLength: 200 }, takeaway: { type: 'string', minLength: 1, maxLength: 80 }, factIds: { type: 'array', minItems: 1, maxItems: lesson.facts.length, items: { type: 'string', enum: lesson.facts.map(f => f.id) } } },
     required: ['title', 'why', 'better', 'takeaway', 'factIds'],
   };
-  const input = JSON.stringify({ allowedSquares: tutorCoordinates(lesson, evidence), outputRules: '只可提及 allowedSquares 內的格子。title 最多60字；why 1至3項，每項最多240字；better 最多400字；takeaway 最多160字。不要用 Markdown 包住 JSON。', facts: lesson.facts, theme: lesson.theme, bestLine: lesson.bestLine, playedLine: lesson.playedLine, scorePerspective: 'white', learner: new Chess(evidence.fen).turn() });
+  const input = JSON.stringify({ allowedSquares: tutorCoordinates(lesson, evidence), outputRules: '提供精簡解說，全文以約200字為目標，不必填滿上限。只可提及 allowedSquares 內的格子。title 最多40字；why 1至2項，每項最多120字；better 最多200字；takeaway 最多80字。不要重算棋局或重複整條變化線。不要用 Markdown 包住 JSON。', facts: lesson.facts, theme: lesson.theme, bestLine: lesson.bestLine, playedLine: lesson.playedLine, scorePerspective: 'white', learner: new Chess(evidence.fen).turn() });
   const { provider, key, model } = credential;
   const url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const headers: Record<string, string> = provider === 'openai' ? { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` } : { 'Content-Type': 'application/json', 'x-goog-api-key': key };

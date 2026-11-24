@@ -87,3 +87,24 @@ test('the real same-origin API accepts validated evidence and provides no-key te
   expect(lesson.source).toBe('engine');
   expect(lesson.text.why.join(' ')).toContain('Qh4#');
 });
+
+test('a slow explanation can be cancelled and requested again without displaying the stale result',async({page})=>{
+ test.setTimeout(90000);let calls=0;let release!:()=>void;
+ const reply={source:'ai',notice:'AI 解說仍需核對。',text:{title:'新的教練解說',why:['先觀察對方的將軍。'],better:'比較建議走法與原走法。',takeaway:'落子前檢查威脅。',factIds:['suggestion']}};
+ await page.route('**/api/tutor',async route=>{
+  if(route.request().method()==='GET')return route.fulfill({json:{available:true}});
+  calls++;
+  if(calls===1){await new Promise<void>(resolve=>{release=resolve;});await route.fulfill({json:{...reply,text:{...reply.text,title:'已取消的舊解說'}}}).catch(()=>{});}
+  else await route.fulfill({json:reply});
+ });
+ await openLesson(page);await page.getByRole('button',{name:'查看參考答案'}).click();
+ await page.clock.install();
+ const explain=page.getByRole('button',{name:'請 AI 教練解說這一步'});
+ await explain.click();await expect(page.getByRole('button',{name:'停止等待',exact:true})).toBeVisible();
+ await expect.poll(()=>calls).toBe(1);await page.clock.fastForward(21000);
+ await expect(page.getByRole('status').filter({hasText:'AI 服務回覆較慢'})).toBeVisible();
+ await page.getByRole('button',{name:'停止等待',exact:true}).click();
+ await expect(explain).toBeEnabled();await expect(page.locator('.tutor-notice')).toContainText('已停止等待');
+ release();await explain.click();await expect(page.getByRole('heading',{name:'新的教練解說'})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'已取消的舊解說'})).toHaveCount(0);expect(calls).toBe(2);
+});

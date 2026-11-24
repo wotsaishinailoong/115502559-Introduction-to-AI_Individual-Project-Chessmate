@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { buildLesson, validateEvidence, validateTutorText, type Lesson, type TutorText } from './teaching.ts';
-import { providers, validModel, type Provider } from './tutor-config.ts';
+import { providers, validModel, TUTOR_SERVER_TIMEOUT_MS, type Provider } from './tutor-config.ts';
 import { generateTutor, TutorProviderError } from './tutor-provider.ts';
 
 export type TutorResponse = { source: 'engine' | 'ai'; text: TutorText; notice: string };
@@ -16,7 +16,7 @@ export async function tutorReply(raw: unknown, options: Options = {}): Promise<T
   const provider = options.provider ?? 'openai'; const model = options.model || providers[provider].model;
   if (!validModel(model, provider)) return fallback(lesson, '模型設定不正確，先使用引擎教學。');
   const scope = createHash('sha256').update(provider).update(options.key).digest('hex');
-  const key = createHash('sha256').update(JSON.stringify({ evidence, provider, model, scope, version: 4 })).digest('hex');
+  const key = createHash('sha256').update(JSON.stringify({ evidence, provider, model, scope, version: 5 })).digest('hex');
   const now = Date.now();
   for (const [id, entry] of cache) if (entry.expires <= now) cache.delete(id);
   const cached = cache.get(key); if (cached) return cached.result;
@@ -25,9 +25,10 @@ export async function tutorReply(raw: unknown, options: Options = {}): Promise<T
   if (active >= 2 || budget.used >= 20 || !budgets.has(scope) && budgets.size >= 100) return fallback(lesson, 'AI 教練目前較忙，先使用引擎教學，稍後可重試。');
   budgets.set(scope, budget); active++; budget.used++;
   try {
-    const timeout = AbortSignal.timeout(45000);
+    const timeout = AbortSignal.timeout(TUTOR_SERVER_TIMEOUT_MS);
     const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
     const rawText = await generateTutor({ key: options.key, provider, model }, evidence, lesson, signal, options.fetcher);
+    signal.throwIfAborted();
     let text: TutorText;
     try { text = validateTutorText(rawText, lesson, evidence); }
     catch { throw new TutorProviderError('validation', 'AI 回覆未通過教學格式或棋盤依據檢查，可重試或更換模型。'); }
@@ -35,8 +36,9 @@ export async function tutorReply(raw: unknown, options: Options = {}): Promise<T
     if (cache.size >= 100) cache.delete(cache.keys().next().value!);
     cache.set(key, { expires: now + 15 * 60 * 1000, result }); return result;
   } catch (error) {
-    const detail = error instanceof TutorProviderError ? `[${error.code}] ${error.message}`
-      : error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name) ? '[timeout] AI 服務回覆逾時，請稍後重試。'
+    const detail = options.signal?.aborted ? '[cancelled] 已停止等待這次解說。'
+      : error instanceof TutorProviderError ? `[${error.code}] ${error.message}`
+      : error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name) ? '[timeout] 等待 AI 服務回覆逾時；可能是生成較慢或連線延遲，不能據此判定額度不足。可稍後重試或改用帳戶中其他可用的文字模型。'
       : error instanceof SyntaxError ? '[format] AI 未傳回完整的 JSON 解說，請重試或更換模型。'
       : '[connection] 無法取得 AI 解說，請檢查伺服器對外連線或稍後重試。';
     return fallback(lesson, `${detail} 先使用引擎教學。`);

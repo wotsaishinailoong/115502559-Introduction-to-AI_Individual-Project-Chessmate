@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import type { Position } from '../../lib/analysis';
+import { TUTOR_CLIENT_TIMEOUT_MS } from '../../lib/tutor-config';
 import { buildLesson, evidenceFromPosition, validateTutorText, type TutorText } from '../../lib/teaching';
 
 export type Variation = { kind: 'best' | 'played'; step: number };
@@ -12,10 +13,16 @@ export default function TutorLesson({ position, variation, onVariation }: { posi
   const [available, setAvailable] = useState(false);
   const [checking, setChecking] = useState(true);
   const [working, setWorking] = useState(false);
+  const [slow, setSlow] = useState(false);
   const [text, setText] = useState<TutorText>(lesson);
   const [source, setSource] = useState<'engine' | 'ai'>('engine');
   const [notice, setNotice] = useState('');
   const pending = useRef<AbortController | null>(null);
+  useEffect(() => {
+    if (!working) return;
+    const timer = setTimeout(() => setSlow(true), 20000);
+    return () => clearTimeout(timer);
+  }, [working]);
   useEffect(() => {
     const controller = new AbortController();
     fetch('/api/tutor', { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), cache: 'no-store' })
@@ -25,17 +32,21 @@ export default function TutorLesson({ position, variation, onVariation }: { posi
   }, []);
   async function explain() {
     if (pending.current) return;
-    const controller = new AbortController(); pending.current = controller; setWorking(true); setNotice('');
+    const controller = new AbortController(); pending.current = controller; setWorking(true); setSlow(false); setNotice('');
     try {
-      const response = await fetch('/api/tutor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(evidence), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(55000)]) });
+      const response = await fetch('/api/tutor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(evidence), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(TUTOR_CLIENT_TIMEOUT_MS)]) });
       if (!response.ok) throw new Error('Tutor unavailable');
       const data = await response.json();
       if (data.source !== 'engine' && data.source !== 'ai') throw new Error('Unexpected response');
       const checked = validateTutorText(data.text, lesson, evidence);
       if (!controller.signal.aborted) { setText(checked); setSource(data.source); setNotice(typeof data.notice === 'string' ? data.notice.slice(0, 200) : ''); }
-    } catch {
-      if (!controller.signal.aborted) { setText(lesson); setSource('engine'); setNotice('AI 教練暫時無法回應，先使用下方的引擎教學。'); }
+    } catch (error) {
+      if (!controller.signal.aborted) { setText(lesson); setSource('engine'); setNotice(error instanceof Error && error.name === 'TimeoutError' ? '[timeout] 網站未在等待時間內收到解說，先使用下方的引擎教學；可稍後重試或更換可用模型。' : 'AI 教練暫時無法回應，先使用下方的引擎教學。'); }
     } finally { if (!controller.signal.aborted) setWorking(false); if (pending.current === controller) pending.current = null; }
+  }
+  function stopWaiting() {
+    pending.current?.abort(); pending.current = null;
+    setWorking(false); setSlow(false); setNotice('已停止等待；仍可閱讀引擎教學或稍後重新請教。');
   }
   const kind = variation?.kind ?? 'best';
   const labels = kind === 'best' ? lesson.bestLine : lesson.playedLine;
@@ -48,7 +59,7 @@ export default function TutorLesson({ position, variation, onVariation }: { posi
     <div className="ai-explanation"><button className="ai-tutor-button" disabled={checking || !available || working || source === 'ai'} onClick={() => void explain()}><Sparkles size={16}/>{working ? '教練正在整理…' : source === 'ai' ? '已取得 AI 解說' : checking ? '正在確認教練狀態…' : available ? '請 AI 教練解說這一步' : 'AI 教練尚未啟用'}</button>
       {available && source !== 'ai' && <p className="analysis-note">點選後，會把這個局面與分析資料傳送給 AI 服務產生解說。</p>}
       {!available && !checking && <p className="analysis-note">尚未連接可用的 AI 金鑰，你仍可使用完整的引擎教學與重走功能。</p>}
-      {working && <p role="status">正在根據這一步的引擎資料整理教學…</p>}
+      {working && <><p role="status">{slow ? 'AI 服務回覆較慢，仍在等待中（最多約 90 秒）。你可以繼續查看引擎教學，或停止等待。' : '正在根據這一步的引擎資料整理教學…'}</p><button onClick={stopWaiting}>停止等待</button></>}
       {notice && <p className="tutor-notice" role="status">{notice}</p>}
     </div>
     <Link className="manage-ai-link" href="/settings">設定或管理 AI 金鑰 →</Link><details className="lesson-evidence"><summary>查看分析依據</summary><ul>{lesson.facts.filter(f => text.factIds.includes(f.id)).map(f => <li key={f.id}>{f.text}</li>)}</ul></details>

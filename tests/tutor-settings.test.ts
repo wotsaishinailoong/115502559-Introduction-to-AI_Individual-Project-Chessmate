@@ -93,7 +93,7 @@ test('both providers receive enough output budget and the same validator constra
   await generateTutor({key:dummy,provider,model:provider==='openai'?'gpt-4.1-mini':'gemini-3.8-flash'},evidence,lesson,AbortSignal.timeout(2000),async(_url,init)=>{
    const body=JSON.parse(init!.body as string);
    const schema=provider==='openai'?body.response_format.json_schema.schema:body.generationConfig.responseJsonSchema;
-   assert.equal(schema.properties.why.maxItems,3);assert.equal(schema.properties.better.maxLength,400);
+   assert.equal(schema.properties.why.maxItems,2);assert.equal(schema.properties.better.maxLength,200);
    const input=JSON.parse(provider==='openai'?body.messages[1].content:body.contents[0].parts[0].text);
    assert.ok(input.allowedSquares.includes('h4'));assert.ok(!input.allowedSquares.includes('a7'));
    if(provider==='openai'){assert.equal(body.max_completion_tokens,4096);return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(text)}}]});}
@@ -122,4 +122,21 @@ test('incomplete output and ungrounded content remain engine fallbacks with dist
  }
  const invalid=await tutorReply(fixture(),{key:'test-invalid-grounding',fetcher:async()=>Response.json({choices:[{message:{content:JSON.stringify({...text,better:'王走到 a7。'})}}]})});
  assert.equal(invalid.source,'engine');assert.match(invalid.notice,/\[validation\]/);
+});
+
+test('a timeout does not cache failure or retry a paid request automatically',async()=>{
+ const options={key:'test-timeout-manual-retry',provider:'gemini' as const};let calls=0;
+ const first=await tutorReply(fixture(),{...options,fetcher:async()=>{calls++;throw new DOMException('private-network-detail','TimeoutError');}});
+ assert.equal(first.source,'engine');assert.match(first.notice,/\[timeout\]/);assert.ok(!first.notice.includes('private-network-detail'));assert.equal(calls,1);
+ const retry=await tutorReply(fixture(),{...options,fetcher:async()=>{calls++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(text)}]}}]});}});
+ assert.equal(retry.source,'ai');assert.equal(calls,2);
+});
+
+test('a late response after cancellation is not cached or labelled as a provider timeout',async()=>{
+ const controller=new AbortController();let calls=0;
+ const options={key:'test-cancel-late-response',fetcher:async()=>{calls++;controller.abort();return Response.json({choices:[{message:{content:JSON.stringify(text)}}]});}};
+ const first=await tutorReply(fixture(),{...options,signal:controller.signal});
+ assert.equal(first.source,'engine');assert.match(first.notice,/\[cancelled\]/);
+ const retry=await tutorReply(fixture(),{...options,fetcher:async()=>{calls++;return Response.json({choices:[{message:{content:JSON.stringify(text)}}]});}});
+ assert.equal(retry.source,'ai');assert.equal(calls,2);
 });
