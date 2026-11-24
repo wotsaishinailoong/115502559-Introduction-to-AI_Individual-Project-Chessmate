@@ -1,11 +1,16 @@
 import { Chess } from 'chess.js';
 import { HttpError } from './http-server.ts';
 import { providerFetch, type Fetcher } from './provider-http.ts';
-import { type Provider, providers, validModel } from './tutor-config.ts';
+import { type Provider, isProvider, providers, validModel } from './tutor-config.ts';
 import type { Credential } from './tutor-sessions.ts';
 import { tutorCoordinates, type Lesson, type TutorEvidence } from './teaching.ts';
 
 const instructions = '你是繁體中文西洋棋初學者教練。只依據提供的引擎事實與合法變化線講解。不要自行計算走法、發明棋子位置、宣稱唯一解、把局勢分數當勝率，或假設對手必定依示範線走。以簡單、友善、具體的文字說明為什麼要改進、如何比較建議走法，以及下一局的一個檢查習慣。只引用提供的 factIds；沒有依據時承認無法判定戰術原因。';
+function authorizationHeaders({ provider, key }: Credential): Record<string, string> {
+  if (provider === 'openai') return { Authorization: `Bearer ${key}` };
+  if (provider === 'claude') return { 'x-api-key': key, 'anthropic-version': '2026-10-21' };
+  return { 'x-goog-api-key': key };
+}
 // Only fixed, actionable messages leave the server; provider bodies may contain secrets.
 export class TutorProviderError extends Error {
   code: string;
@@ -23,13 +28,14 @@ function providerFailure(status: number): TutorProviderError {
   if (status === 502) return failure('service', 'AI 服務或中間閘道回應異常，請稍後重試。');
   if (status === 503) return failure('service', '上游暫時無法提供服務，可能忙碌或維護；不代表你的免費額度已用完。請稍後重試或更換可用模型。');
   if (status === 504) return failure('service', '上游或中間閘道等待生成逾時，請稍後重試。');
+  if (status === 529) return failure('service', 'AI 服務目前過載，請稍後重試。');
   return failure('service', 'AI 服務未成功處理生成請求，請依狀態碼檢查服務或網路。');
 }
 export async function verifyCredential(credential: Credential, fetcher?: Fetcher, signal?: AbortSignal) {
-  const { key, provider, model } = credential;
+  const { provider, model } = credential;
   if (!validModel(model, provider)) throw new HttpError(400, '模型名稱不正確。');
-  const url = provider === 'openai' ? `https://api.openai.com/v1/models/${encodeURIComponent(model)}` : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`;
-  const headers: Record<string, string> = provider === 'openai' ? { Authorization: `Bearer ${key}` } : { 'x-goog-api-key': key };
+  const url = provider === 'openai' ? `https://api.openai.com/v1/models/${encodeURIComponent(model)}` : provider === 'claude' ? `https://api.anthropic.com/v1/models/${encodeURIComponent(model)}` : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`;
+  const headers = authorizationHeaders(credential);
   try {
     const timeout = AbortSignal.timeout(12000);
     const response = await providerFetch(url, { method: 'GET', headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout }, fetcher);
@@ -42,7 +48,11 @@ export async function verifyCredential(credential: Credential, fetcher?: Fetcher
     }
     const body = await response.text(); if (body.length > 50000) throw new Error('Oversized model metadata');
     const data = JSON.parse(body);
-    if (provider === 'openai' ? data.id !== model : data.name !== `models/${model}` || !data.supportedGenerationMethods?.includes('generateContent')) throw new HttpError(400, '這個模型無法用於目前的文字教學介面。');
+    // Anthropic resolves model aliases to a dated ID; exact equality would reject valid aliases.
+    const supported = provider === 'openai' ? data.id === model
+      : provider === 'claude' ? data.type === 'model' && validModel(data.id, 'claude') && data.capabilities?.structured_outputs?.supported !== false
+      : data.name === `models/${model}` && data.supportedGenerationMethods?.includes('generateContent');
+    if (!supported) throw new HttpError(400, '這個模型無法用於目前的文字教學介面。');
   } catch (e) {
     if (e instanceof HttpError) throw e;
     throw new HttpError(502, '無法完成連線測試，請確認網路與模型名稱後重試。');
@@ -55,12 +65,21 @@ export async function generateTutor(credential: Credential, evidence: TutorEvide
     required: ['title', 'why', 'better', 'takeaway', 'factIds'],
   };
   const input = JSON.stringify({ allowedSquares: tutorCoordinates(lesson, evidence), outputRules: '提供精簡解說，全文以約200字為目標，不必填滿上限。只可提及 allowedSquares 內的格子。title 最多40字；why 1至2項，每項最多120字；better 最多200字；takeaway 最多80字。不要重算棋局或重複整條變化線。不要用 Markdown 包住 JSON。', facts: lesson.facts, theme: lesson.theme, bestLine: lesson.bestLine, playedLine: lesson.playedLine, scorePerspective: 'white', learner: new Chess(evidence.fen).turn() });
-  const { provider, key, model } = credential;
-  const url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const headers: Record<string, string> = provider === 'openai' ? { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` } : { 'Content-Type': 'application/json', 'x-goog-api-key': key };
+  const { provider, model } = credential;
+  const url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : provider === 'claude' ? 'https://api.anthropic.com/v1/messages' : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const headers = { 'Content-Type': 'application/json', ...authorizationHeaders(credential) };
+  // Claude does not accept string-length or maxItems constraints. Keep them in the
+  // prompt and validate locally, while the API constrains types, keys and references.
+  const claudeSchema = { ...schema, properties: {
+    title: { type: 'string' }, why: { type: 'array', minItems: 1, items: { type: 'string' } },
+    better: { type: 'string' }, takeaway: { type: 'string' },
+    factIds: { type: 'array', minItems: 1, items: schema.properties.factIds.items },
+  } };
   const body = provider === 'openai' ? { model, max_completion_tokens: 4096, store: false,
     messages: [{ role: 'system', content: instructions }, { role: 'user', content: input }],
     response_format: { type: 'json_schema', json_schema: { name: 'chess_lesson', strict: true, schema } },
+  } : provider === 'claude' ? { model, max_tokens: 4096, system: instructions,
+    messages: [{ role: 'user', content: input }], output_config: { format: { type: 'json_schema', schema: claudeSchema } },
   } : { systemInstruction: { parts: [{ text: instructions }] }, contents: [{ role: 'user', parts: [{ text: input }] }], generationConfig: { maxOutputTokens: 4096, ...(/^gemini-[3-9]/.test(model) ? { thinkingConfig: { thinkingLevel: 'LOW' } } : /^gemini-2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}), responseMimeType: 'application/json', responseJsonSchema: schema } };
   const response = await providerFetch(url, { method: 'POST', signal, headers, body: JSON.stringify(body) }, fetcher);
   if (!response.ok) { await response.body?.cancel(); throw providerFailure(response.status); }
@@ -72,6 +91,10 @@ export async function generateTutor(credential: Credential, evidence: TutorEvide
     const message = data?.choices?.[0]?.message;
     if (message?.refusal || typeof message?.content !== 'string') throw new TutorProviderError('blocked', 'AI 服務沒有提供可用文字，請稍後重試或更換文字模型。');
     text = message.content;
+  } else if (provider === 'claude') {
+    if (data?.stop_reason === 'max_tokens') throw new TutorProviderError('output_limit', 'Claude 回覆達到輸出上限，未完成解說；請稍後重試或更換模型。');
+    if (data?.stop_reason !== 'end_turn' || !Array.isArray(data?.content)) throw new TutorProviderError('blocked', 'Claude 沒有提供完整的文字解說，請稍後重試或更換模型。');
+    text = data.content.filter((p: { type?: string; text?: string }) => p.type === 'text' && typeof p.text === 'string').map((p: { text: string }) => p.text).join('');
   } else {
     const candidate = data?.candidates?.[0];
     if (candidate?.finishReason === 'MAX_TOKENS') throw new TutorProviderError('output_limit', 'AI 思考或文字達到輸出上限，未完成解說；請改用預設文字模型後重試。');
@@ -82,7 +105,7 @@ export async function generateTutor(credential: Credential, evidence: TutorEvide
 }
 export function credentialFromInput(value: unknown): Credential {
   const data = value as Record<string, unknown> | null;
-  if (!data || typeof data !== 'object' || Array.isArray(data) || (data.provider !== 'openai' && data.provider !== 'gemini')) throw new HttpError(400, '請選擇 OpenAI 或 Google Gemini。');
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !isProvider(data.provider)) throw new HttpError(400, '請選擇 OpenAI、Google Gemini 或 Claude。');
   if (typeof data.key !== 'string' || !/^[A-Za-z0-9._-]{10,512}$/.test(data.key.trim())) throw new HttpError(400, '請輸入有效的 API 金鑰，且不要包含空格或換行。');
   const provider: Provider = data.provider;
   const model = typeof data.model === 'string' ? data.model.trim() : providers[provider].model;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Chess } from 'chess.js';
 import { HttpError, sameOrigin } from '../lib/http-server.ts';
 import { settingsHandlers } from '../lib/tutor-settings-server.ts';
-import { SESSION_COOKIE, SESSION_TTL, TutorSessions, connectionStatus, resolveCredential } from '../lib/tutor-sessions.ts';
+import { SESSION_COOKIE, SESSION_TTL, TutorSessions, connectionStatus, resolveCredential, siteCredential } from '../lib/tutor-sessions.ts';
 import { credentialFromInput, generateTutor, verifyCredential } from '../lib/tutor-provider.ts';
 import { buildLesson, type TutorEvidence } from '../lib/teaching.ts';
 import { tutorReply } from '../lib/tutor-server.ts';
@@ -104,8 +104,8 @@ test('both providers receive enough output budget and the same validator constra
 });
 
 test('generation failures explain the next action without exposing provider bodies or keys',async()=>{
- const cases:[number,string][]=[[401,'access'],[403,'access'],[429,'quota'],[404,'model'],[400,'request'],[422,'request'],[500,'service'],[502,'service'],[503,'service'],[504,'service'],[418,'service']];
- for(const provider of ['openai','gemini'] as const)for(const [status,code] of cases){
+ const cases:[number,string][]=[[401,'access'],[403,'access'],[429,'quota'],[404,'model'],[400,'request'],[422,'request'],[500,'service'],[502,'service'],[503,'service'],[504,'service'],[529,'service'],[418,'service']];
+ for(const provider of ['openai','gemini','claude'] as const)for(const [status,code] of cases){
   let calls=0;
   const result=await tutorReply(fixture(),{key:`test-diagnostics-${provider}-${status}`,provider,fetcher:async()=>{calls++;return new Response(`private-body-${dummy}`,{status});}});
   assert.equal(result.source,'engine');assert.ok(result.notice.includes(`[${code}]`));assert.ok(result.notice.includes(`HTTP ${status}`));assert.ok(!JSON.stringify(result).includes(dummy));assert.equal(calls,1);
@@ -139,4 +139,58 @@ test('a late response after cancellation is not cached or labelled as a provider
  assert.equal(first.source,'engine');assert.match(first.notice,/\[cancelled\]/);
  const retry=await tutorReply(fixture(),{...options,fetcher:async()=>{calls++;return Response.json({choices:[{message:{content:JSON.stringify(text)}}]});}});
  assert.equal(retry.source,'ai');assert.equal(calls,2);
+});
+
+const claudeCredential={key:dummy,provider:'claude' as const,model:'claude-haiku-4-5'};
+test('Claude connection uses the fixed Anthropic endpoint, accepts resolved aliases and rejects unsupported models',async()=>{
+ await verifyCredential(claudeCredential,async(url,init)=>{
+  assert.equal(url,'https://api.anthropic.com/v1/models/claude-haiku-4-5');assert.equal(init?.method,'GET');
+  const headers=init!.headers as Record<string,string>;assert.equal(headers['x-api-key'],dummy);assert.equal(headers['anthropic-version'],'2026-10-21');assert.ok(!String(url).includes(dummy));
+  return Response.json({type:'model',id:'claude-haiku-4-5-20251001',capabilities:{structured_outputs:{supported:true}}});
+ });
+ await assert.rejects(verifyCredential(claudeCredential,async()=>Response.json({type:'model',id:'claude-old-model',capabilities:{structured_outputs:{supported:false}}})),/文字教學/);
+ await assert.rejects(verifyCredential(claudeCredential,async()=>new Response(`private-${dummy}`,{status:401})),e=>e instanceof HttpError&&!e.message.includes(dummy));
+ assert.deepEqual(credentialFromInput({key:dummy,provider:'claude'}),claudeCredential);
+ assert.throws(()=>credentialFromInput({...claudeCredential,model:'gemini-3.8-flash'}));
+});
+
+test('Claude messages use compatible structured outputs and parse only completed text blocks',async()=>{
+ const evidence=fixture();let calls=0;
+ const result=await tutorReply(evidence,{...claudeCredential,key:'test-claude-generation-key',fetcher:async(url,init)=>{
+  calls++;assert.equal(url,'https://api.anthropic.com/v1/messages');assert.equal(init?.method,'POST');
+  assert.equal((init!.headers as Record<string,string>)['x-api-key'],'test-claude-generation-key');
+  const body=JSON.parse(init!.body as string);assert.equal(body.model,claudeCredential.model);assert.equal(body.max_tokens,4096);assert.ok(body.system.includes('繁體中文'));
+  const input=JSON.parse(body.messages[0].content);assert.ok(input.facts.length);assert.ok(input.allowedSquares.includes('h4'));assert.equal('pgn' in input,false);assert.ok(!JSON.stringify(body).includes('test-claude-generation-key'));
+  const schema=body.output_config.format.schema;assert.equal(body.output_config.format.type,'json_schema');assert.equal(schema.additionalProperties,false);assert.ok(schema.required.includes('factIds'));assert.ok(schema.properties.factIds.items.enum.includes('reply'));
+  assert.ok(!JSON.stringify(schema).includes('maxLength'));assert.ok(!JSON.stringify(schema).includes('maxItems'));
+  const json=JSON.stringify(text);return Response.json({type:'message',stop_reason:'end_turn',content:[{type:'thinking',thinking:'private reasoning'},{type:'text',text:json.slice(0,15)},{type:'text',text:json.slice(15)}]});
+ }});
+ assert.equal(result.source,'ai');assert.deepEqual(result.text,text);assert.ok(result.notice.includes('Claude'));assert.ok(!JSON.stringify(result).includes('private reasoning'));
+ const cached=await tutorReply(evidence,{...claudeCredential,key:'test-claude-generation-key',fetcher:async()=>{throw new Error('should use cache');}});assert.equal(cached.source,'ai');assert.equal(calls,1);
+ const openai=await tutorReply(evidence,{key:'test-claude-generation-key',provider:'openai',fetcher:async()=>{calls++;return Response.json({choices:[{message:{content:JSON.stringify(text)}}]});}});assert.equal(openai.source,'ai');assert.equal(calls,2);
+});
+
+test('Claude truncation, refusal, invalid JSON and unsupported claims retain engine teaching',async()=>{
+ const cases:[Record<string,unknown>,string][]=[
+  [{stop_reason:'max_tokens',content:[]},'output_limit'],
+  [{stop_reason:'refusal',content:[{type:'text',text:'private refusal'}]},'blocked'],
+  [{stop_reason:'tool_use',content:[]},'blocked'],
+  [{stop_reason:'end_turn',content:[{type:'text',text:'invalid-json'}]},'format'],
+  [{stop_reason:'end_turn',content:[{type:'text',text:JSON.stringify({...text,better:'王走到 a7。'})}]},'validation'],
+ ];
+ for(const [i,[data,code]] of cases.entries()){
+  const result=await tutorReply(fixture(),{...claudeCredential,key:`test-claude-failure-${i}`,fetcher:async()=>Response.json(data)});
+  assert.equal(result.source,'engine');assert.match(result.notice,new RegExp(`\\[${code}\\]`));assert.ok(!JSON.stringify(result).includes('private refusal'));
+ }
+});
+
+test('Claude personal sessions and site configuration share the same private credential resolution',async t=>{
+ const previous={key:process.env.TUTOR_API_KEY,provider:process.env.TUTOR_PROVIDER,model:process.env.TUTOR_MODEL};
+ t.after(()=>{for(const [name,value] of Object.entries({TUTOR_API_KEY:previous.key,TUTOR_PROVIDER:previous.provider,TUTOR_MODEL:previous.model})){if(value===undefined)delete process.env[name];else process.env[name]=value;}});
+ process.env.TUTOR_API_KEY=dummy;process.env.TUTOR_PROVIDER='claude';delete process.env.TUTOR_MODEL;
+ assert.deepEqual(siteCredential(),claudeCredential);
+ const sessions=new TutorSessions();const handlers=settingsHandlers({sessions,site:()=>null,verify:async c=>{assert.deepEqual(c,claudeCredential);}});
+ const response=await handlers.POST(req('POST',claudeCredential));assert.equal(response.status,200);const cookie=response.headers.get('set-cookie')!.split(';')[0];
+ const status=await handlers.GET(req('GET',undefined,cookie)).json();assert.equal(status.provider,'claude');assert.ok(!JSON.stringify(status).includes(dummy));assert.deepEqual(resolveCredential(req('GET',undefined,cookie),sessions,null).credential,{...claudeCredential,expiresAt:status.expiresAt});
+ await handlers.DELETE(req('DELETE',undefined,cookie));assert.equal(resolveCredential(req('GET',undefined,cookie),sessions,null).credential,null);
 });

@@ -3,13 +3,13 @@ const none={available:false,source:'none',provider:null,model:null,expiresAt:nul
 const dummy='test-only-not-a-real-browser-key';
 async function containsKey(page:Page){return page.evaluate(secret=>JSON.stringify({...localStorage,...sessionStorage}).includes(secret),dummy);}
 
-test('connect OpenAI and Gemini, confirm session status, reload without showing the key, and remove connection',async({page})=>{
+test('connect OpenAI, Gemini and Claude, confirm session status, reload without showing the key, and remove connection',async({page})=>{
  let current:Record<string,unknown>={...none};let sent=0;
  await page.route('**/api/tutor/settings',async route=>{
   const method=route.request().method();
   if(method==='GET')return route.fulfill({json:current});
   if(method==='DELETE'){current={...none};return route.fulfill({json:current});}
-  const input=route.request().postDataJSON();sent++;expect(input.key).toBe(dummy);expect(['openai','gemini']).toContain(input.provider);
+  const input=route.request().postDataJSON();sent++;expect(input.key).toBe(dummy);expect(['openai','gemini','claude']).toContain(input.provider);
   current={available:true,source:'personal',provider:input.provider,model:input.model,expiresAt:Date.now()+3600000};return route.fulfill({json:current});
  });
  await page.goto('/settings');await page.locator('#tutor-api-key').fill(dummy);await page.getByRole('button',{name:'顯示金鑰'}).click();await expect(page.locator('#tutor-api-key')).toHaveAttribute('type','text');
@@ -19,8 +19,12 @@ test('connect OpenAI and Gemini, confirm session status, reload without showing 
  await page.getByRole('button',{name:'Google Gemini',exact:true}).click();await expect(page.locator('#tutor-model')).toHaveValue('gemini-3.8-flash');await page.locator('#tutor-api-key').fill(dummy);
  await page.getByRole('button',{name:'測試連線並暫存',exact:true}).click();await expect(page.locator('.connection-status')).toContainText('Google Gemini');
  await page.reload();await expect(page.locator('.connection-status')).toContainText('Google Gemini');await expect(page.locator('#tutor-api-key')).toHaveValue('');
+ await page.getByRole('button',{name:'Claude',exact:true}).click();await expect(page.locator('#tutor-model')).toHaveValue('claude-haiku-4-5');await expect(page.locator('#tutor-api-key')).toHaveValue('');
+ await expect(page.getByRole('link',{name:'到 Claude 取得金鑰 ↗'})).toHaveAttribute('href','https://platform.claude.com/settings/keys');
+ await page.locator('#tutor-api-key').fill(dummy);await page.getByRole('button',{name:'測試連線並暫存',exact:true}).click();await expect(page.locator('.connection-status')).toContainText('Claude');
+ await page.reload();await expect(page.locator('.connection-status')).toContainText('Claude');await expect(page.locator('#tutor-api-key')).toHaveValue('');
  await page.getByRole('button',{name:'移除個人連線',exact:true}).click();await expect(page.locator('.connection-badge')).toHaveText('尚未連線');await expect(page.getByRole('button',{name:'移除個人連線',exact:true})).toBeDisabled();
- expect(sent).toBe(2);expect(await containsKey(page)).toBe(false);
+ expect(sent).toBe(3);expect(await containsKey(page)).toBe(false);
 });
 
 test('failed replacement leaves a working connection intact and the mobile settings and game remain usable',async({page})=>{

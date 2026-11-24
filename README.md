@@ -27,7 +27,7 @@ npm run dev
 - 分析、重走、提示與引擎教學皆在瀏覽器執行，無需後端引擎或 API key。
 - 教學整理為「為什麼、怎麼比較、下次記得」，並依合法變化中的將軍、將殺或吃子事件給予主題；適用時，以規則驗證的對照線說明建議走法如何保留合法防守。
 - 可逐步播放建議與原走法變化，或下載 Markdown 復盤講義（包含引擎教學，不包含選用 AI 文案）。
-- 選用 AI 教練：僅在使用者點選後，把單一關鍵局面的分析資料送到站內伺服器，再由伺服器請求 OpenAI 或 Google Gemini；不送整局 PGN。
+- 選用 AI 教練：僅在使用者點選後，把單一關鍵局面的分析資料送到站內伺服器，再由伺服器請求 OpenAI、Google Gemini 或 Claude；不送整局 PGN。
 
 ## 個人複習紀錄
 
@@ -51,9 +51,9 @@ npm run dev
 
 ### 在網站接入自己的金鑰
 
-1. 點導覽列的「AI 設定」（`/settings`），選擇 OpenAI 或 Google Gemini。
-2. 填入模型 ID 與該服務的 API 金鑰，按「測試連線並暫存」。預設模型為 `gpt-4.1-mini` 與 `gemini-3.8-flash`，也可改為帳號可用且支援結構化 JSON 輸出的文字模型。
-3. 測試只查詢模型資訊，不產生教學內容，也不代表額度與後續生成一定成功。測試需允許讀取該模型資訊；Gemini 模型還需支援 `generateContent`。
+1. 點導覽列的「AI 設定」（`/settings`），選擇 OpenAI、Google Gemini 或 Claude。
+2. 填入模型 ID 與該服務的 API 金鑰，按「測試連線並暫存」。預設模型為 `gpt-4.1-mini`、`gemini-3.8-flash` 與 `claude-haiku-4-5`，也可改為帳號可用且支援結構化 JSON 輸出的文字模型。
+3. 測試只查詢模型資訊，不產生教學內容，也不代表額度與後續生成一定成功。測試需允許讀取該模型資訊；Gemini 模型還需支援 `generateContent`；Claude 需支援 JSON structured outputs（模型查詢支援別名解析）。
 4. 成功後回到復盤教室，在參考答案內點「請 AI 教練解說這一步」。真正生成會依所選服務的額度與計費規則執行。
 5. 「移除個人連線」只清除本站這個連線，不會撤銷服務商的金鑰。有站方設定時會回退至站方連線。
 
@@ -61,25 +61,25 @@ npm run dev
 
 重啟伺服器、連線到期或移除後需重新輸入。此版本最多一百份暫存連線，採單一 Node 程序共享的記憶體；多實例部署須使用黏著連線或另行設計共用秘密儲存。金鑰設定頁需 HTTPS，開發時允許 localhost。請在新分頁測試 Codespaces 預覽，以免內嵌預覽限制 Cookie。
 
-OpenAI 金鑰可在 https://platform.openai.com/api-keys 建立；Gemini 金鑰可在 https://aistudio.google.com/api-keys 建立。不要把金鑰貼在聊天室、提交到 Git 或放進網址。
+OpenAI 金鑰可在 https://platform.openai.com/api-keys 建立；Gemini 金鑰可在 https://aistudio.google.com/api-keys 建立；Claude 金鑰可在 https://platform.claude.com/settings/keys 建立。Claude 訂閱與 Anthropic API 額度分開計費。不要把金鑰貼在聊天室、提交到 Git 或放進網址。
 
 ### 站方共用設定（選用）
 
-也可將 `.env.example` 複製成 `.env.local`，設定 `TUTOR_API_KEY`、`TUTOR_PROVIDER`（`openai` 或 `gemini`）及 `TUTOR_MODEL`，再重新啟動網站。未指定 provider 時沿用 OpenAI；未指定 model 時使用該服務的預設模型。個人連線優先於站方連線。
+也可將 `.env.example` 複製成 `.env.local`，設定 `TUTOR_API_KEY`、`TUTOR_PROVIDER`（`openai`、`gemini` 或 `claude`）及 `TUTOR_MODEL`，再重新啟動網站。未指定 provider 時沿用 OpenAI；未指定 model 時使用該服務的預設模型。個人連線優先於站方連線。
 
-雲端部署使用平台的安全環境變數／秘密設定。OpenAI 的 HTTPS 目的地為 `api.openai.com`；Gemini 為 `generativelanguage.googleapis.com`。代理秘密需綁定相應目的地，網路政策也須允許該主機。伺服器使用 undici `EnvHttpProxyAgent`，遵守既有 HTTP_PROXY、HTTPS_PROXY、NO_PROXY 與 CA 信任設定。
+雲端部署使用平台的安全環境變數／秘密設定。OpenAI 的 HTTPS 目的地為 `api.openai.com`；Gemini 為 `generativelanguage.googleapis.com`；Claude 為 `api.anthropic.com`。代理秘密需綁定相應目的地，網路政策也須允許該主機。伺服器使用 undici `EnvHttpProxyAgent`，遵守既有 HTTP_PROXY、HTTPS_PROXY、NO_PROXY 與 CA 信任設定。
 
 `GET /api/tutor/settings` 只回傳連線來源、服務、模型與到期時間；`POST` 先測試後暫存，失敗保留原連線，`DELETE` 移除。`GET /api/tutor` 只回傳是否啟用；`POST /api/tutor` 接收已限制長度的局面、走法、分數與變化線。伺服器會重新核對走法合法性，再組裝固定格式的教學資料；不接受自由聊天提示。引擎分數仍來自瀏覽器，不代表伺服器重新搜尋過棋局。
 
 - 只有明確點選才呼叫模型；無金鑰、服務失敗、逾時或回覆驗證失敗時退回引擎教學。
 - 模型回覆須為指定結構、引用已提供的事實 ID，且不能引入已核對依據之外的格子。文字含義仍可能出錯，應以合法變化線核對。
-- 兩家服務每次最多 4,096 輸出 tokens（包含模型思考消耗）、90 秒上游逾時，瀏覽器等待上限 100 秒。解說以約 200 字為目標；保留較高 token 上限供思考與 JSON 完成使用，不要求填滿。等待超過 20 秒會顯示較慢提示，並可停止等待。停止等待不保證服務商不計費。Gemini 3 系列使用 LOW 思考等級，2.5 Flash 關閉可選思考。提高上限可能增加單次費用；每次點選只送出一次生成，不自動重試。每組服務與金鑰每十分鐘最多二十次，程序同時最多兩個生成請求。成功結果快取十五分鐘，最多一百筆，按服務、金鑰與模型隔離。金鑰連線測試最多兩個並行、每十分鐘三十次。這是單程序開發版限制，不是服務商配額或跨實例帳號配額。
+- 三家服務每次最多 4,096 輸出 tokens（包含模型思考消耗）、90 秒上游逾時，瀏覽器等待上限 100 秒。解說以約 200 字為目標；保留較高 token 上限供思考與 JSON 完成使用，不要求填滿。等待超過 20 秒會顯示較慢提示，並可停止等待。停止等待不保證服務商不計費。Gemini 3 系列使用 LOW 思考等級，2.5 Flash 關閉可選思考。提高上限可能增加單次費用；每次點選只送出一次生成，不自動重試。每組服務與金鑰每十分鐘最多二十次，程序同時最多兩個生成請求。成功結果快取十五分鐘，最多一百筆，按服務、金鑰與模型隔離。金鑰連線測試最多兩個並行、每十分鐘三十次。這是單程序開發版限制，不是服務商配額或跨實例帳號配額。
 - 生成失敗時仍提供引擎教學，並顯示固定錯誤代碼：`access`（權限）、`quota`（額度或限流）、`model`（模型不存在）、`request`（不支援請求）、`output_limit`（輸出耗盡）、`validation`（格式或棋盤依據未通過）、`format`（JSON 不完整）、`timeout`（逾時）、`connection`（連線或未辨識回覆）、`service`（服務暫時異常）。不把上游錯誤原文或金鑰傳到瀏覽器。
 - 上游拒絕生成時，訊息保留 HTTP 狀態碼。`500` 表示上游內部錯誤；`502` 是服務或閘道異常；`503` 是暫時無法提供服務；`504` 是上游或閘道逾時。這些與 `429`（額度或限流）分開顯示。服務商記錄了請求，不代表生成成功；用量圖也不能取代當次失敗的狀態碼。不自動重試，避免額外消耗免費請求或付費額度。
 - 回覆以純文字呈現；模型生成的內容不會自動變成棋步。重走評分與參考線依然由引擎和 chess.js 決定。
 - 部署需支援 Next.js Node.js API Route，無法直接把此版本當成 GitHub Pages 的純靜態網站。
 
-本環境未提供真實模型金鑰；自動測試以模擬服務驗證兩家模型介面、連線與隔離、傳輸資料與失敗處理，尚未驗證真實金鑰或付費生成。引擎分析與播放則使用真實 WASM 引擎測試。
+本環境未提供真實模型金鑰；自動測試以模擬服務驗證三家模型介面、連線與隔離、傳輸資料與失敗處理，尚未驗證真實金鑰或付費生成。引擎分析與播放則使用真實 WASM 引擎測試。
 
 ## 驗證
 
@@ -110,7 +110,7 @@ npm run test:e2e
 - `lib/analysis-engine.ts`：可取消、具逾時處理的 UCI 分析 Worker。
 - `lib/library.ts`、`app/library/`：個人複習資料、格式檢查、備份合併、進度與主題摘要。
 - `lib/teaching.ts`：合法引擎依據、規則式教學、模型回覆驗證與講義匯出。
-- `lib/tutor-server.ts`、`lib/tutor-provider.ts`：OpenAI／Gemini 生成、唯讀連線測試、逾時、快取與請求限制。
+- `lib/tutor-server.ts`、`lib/tutor-provider.ts`：OpenAI／Gemini／Claude 生成、唯讀連線測試、逾時、快取與請求限制。
 - `app/settings/`、`lib/tutor-sessions.ts`、`lib/tutor-settings-server.ts`：金鑰設定、短期伺服器暫存與 HttpOnly 連線 Cookie。
 
 每次對戰 AI 搜尋使用獨立 Worker，悔棋或新對局會終止舊 Worker。復盤使用另一個單執行緒 Worker，離開頁面或取消時會終止並拒收過期結果。
