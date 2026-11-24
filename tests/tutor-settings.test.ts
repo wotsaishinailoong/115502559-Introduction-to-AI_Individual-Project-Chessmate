@@ -104,11 +104,14 @@ test('both providers receive enough output budget and the same validator constra
 });
 
 test('generation failures explain the next action without exposing provider bodies or keys',async()=>{
- const cases:[number,string][]=[[401,'access'],[403,'access'],[429,'quota'],[404,'model'],[400,'request'],[503,'service']];
+ const cases:[number,string][]=[[401,'access'],[403,'access'],[429,'quota'],[404,'model'],[400,'request'],[422,'request'],[500,'service'],[502,'service'],[503,'service'],[504,'service'],[418,'service']];
  for(const provider of ['openai','gemini'] as const)for(const [status,code] of cases){
   let calls=0;
   const result=await tutorReply(fixture(),{key:`test-diagnostics-${provider}-${status}`,provider,fetcher:async()=>{calls++;return new Response(`private-body-${dummy}`,{status});}});
-  assert.equal(result.source,'engine');assert.ok(result.notice.includes(`[${code}]`));assert.ok(!JSON.stringify(result).includes(dummy));assert.equal(calls,1);
+  assert.equal(result.source,'engine');assert.ok(result.notice.includes(`[${code}]`));assert.ok(result.notice.includes(`HTTP ${status}`));assert.ok(!JSON.stringify(result).includes(dummy));assert.equal(calls,1);
+  if(status===500)assert.match(result.notice,/內部錯誤/);
+  if(status===503)assert.match(result.notice,/不代表你的免費額度已用完/);
+  if(status===504)assert.match(result.notice,/逾時/);
  }
 });
 

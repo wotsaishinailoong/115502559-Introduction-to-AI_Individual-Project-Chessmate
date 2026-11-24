@@ -12,11 +12,18 @@ export class TutorProviderError extends Error {
   constructor(code: string, message: string) { super(message); this.code = code; }
 }
 function providerFailure(status: number): TutorProviderError {
-  if (status === 401 || status === 403) return new TutorProviderError('access', 'AI 服務拒絕生成：請確認金鑰與模型的生成權限，再到 AI 設定重新連接。');
-  if (status === 429) return new TutorProviderError('quota', 'AI 服務的額度不足或請求過於頻繁：請檢查該服務的 API 額度與計費，稍後再試。');
-  if (status === 404) return new TutorProviderError('model', '找不到可生成解說的模型：請到 AI 設定確認模型 ID。');
-  if (status === 400 || status === 422) return new TutorProviderError('request', '模型不支援目前的結構化教學請求：請在 AI 設定改用預設文字模型。');
-  return new TutorProviderError('service', 'AI 服務暫時無法生成解說，請稍後再試。');
+  // Preserve the status rather than treating every upstream failure as missing quota.
+  // Do not forward error bodies, headers or statusText, which may contain private data.
+  const failure = (code: string, message: string) => new TutorProviderError(code, `HTTP ${status}：${message}`);
+  if (status === 401 || status === 403) return failure('access', 'AI 服務拒絕生成：請確認金鑰與模型的生成權限，再到 AI 設定重新連接。');
+  if (status === 429) return failure('quota', 'AI 服務的額度不足或請求過於頻繁：請檢查該服務的 API 額度與計費，稍後再試。');
+  if (status === 404) return failure('model', '找不到可生成解說的模型：請到 AI 設定確認模型 ID。');
+  if (status === 400 || status === 422) return failure('request', '模型不支援目前的結構化教學請求：請在 AI 設定改用預設文字模型。');
+  if (status === 500) return failure('service', '上游回報內部錯誤；這不是額度不足的狀態碼。請稍後重試，持續發生可更換可用模型。');
+  if (status === 502) return failure('service', 'AI 服務或中間閘道回應異常，請稍後重試。');
+  if (status === 503) return failure('service', '上游暫時無法提供服務，可能忙碌或維護；不代表你的免費額度已用完。請稍後重試或更換可用模型。');
+  if (status === 504) return failure('service', '上游或中間閘道等待生成逾時，請稍後重試。');
+  return failure('service', 'AI 服務未成功處理生成請求，請依狀態碼檢查服務或網路。');
 }
 export async function verifyCredential(credential: Credential, fetcher?: Fetcher, signal?: AbortSignal) {
   const { key, provider, model } = credential;
